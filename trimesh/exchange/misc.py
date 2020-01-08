@@ -36,6 +36,7 @@ def load_dict(data, **kwargs):
     Tries to extract keys:
     'faces'
     'vertices'
+    'colors'
     'face_normals'
     'vertex_normals'
 
@@ -55,6 +56,7 @@ def load_dict(data, **kwargs):
             -vertices: (n,3) float
             -faces:    (n,3) int
             -face_normals: (n,3) float (optional)
+            -colors: (n,3) byte 
     """
     if data is None:
         raise ValueError('data passed to load_dict was None!')
@@ -69,6 +71,7 @@ def load_dict(data, **kwargs):
 
     # what shape should the data be to be usable
     mesh_data = {'vertices': (-1, 3),
+                 'colors': (-1, 4),
                  'faces': (-1, (3, 4)),
                  'face_normals': (-1, 3),
                  'face_colors': (-1, (3, 4)),
@@ -83,11 +86,11 @@ def load_dict(data, **kwargs):
         for key, shape in mesh_data.items():
             if key in data:
                 loaded[key] = util.encoded_to_array(data[key])
-                if not util.is_shape(loaded[key], shape):
-                    raise ValueError('Shape of %s is %s, not %s!',
-                                     key,
-                                     str(loaded[key].shape),
-                                     str(shape))
+                #if not util.is_shape(loaded[key][0], shape):
+                #    raise ValueError('Shape of %s is %s, not %s!',
+                #                     key,
+                #                     str(loaded[key].shape),
+                #                     str(shape))
         if len(key) == 0:
             raise ValueError('Unable to extract any mesh data!')
         return loaded

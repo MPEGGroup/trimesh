@@ -26,8 +26,10 @@ import shutil
 
 
 if sys.version_info >= (3, 4):
+    # for newer version of python
     ABC = abc.ABC
 else:
+    # an abstract base class that works on older versions
     ABC = abc.ABCMeta('ABC', (), {})
 
 # a flag we can check elsewhere for Python 3
@@ -45,6 +47,11 @@ else:
     StringIO.__exit__ = lambda a, b, c, d: a.close()
     BytesIO = StringIO
 
+try:
+    from collections.abc import Mapping
+except ImportError:
+    from collections import Mapping
+
 # create a default logger
 log = logging.getLogger('trimesh')
 
@@ -55,13 +62,15 @@ log = logging.getLogger('trimesh')
 TOL_ZERO = np.finfo(np.float64).resolution * 100
 # how close to merge vertices
 TOL_MERGE = 1e-8
+# enable additional potentially slow checks
+_STRICT = False
 
 
 def unitize(vectors,
             check_valid=False,
             threshold=None):
     """
-    Unitize a vector or an array or row- vectors.
+    Unitize a vector or an array or row-vectors.
 
     Parameters
     ------------
@@ -87,7 +96,7 @@ def unitize(vectors,
         threshold = TOL_ZERO
 
     if len(vectors.shape) == 2:
-        # for (m, d) arrays take the per- row unit vector
+        # for (m, d) arrays take the per-row unit vector
         # using sqrt and avoiding exponents is slightly faster
         # also dot with ones is faser than .sum(axis=1)
         norm = np.sqrt(np.dot(vectors * vectors,
@@ -102,7 +111,7 @@ def unitize(vectors,
         unit = vectors * tiled
     elif len(vectors.shape) == 1:
         # treat 1D arrays as a single vector
-        norm = np.sqrt((vectors * vectors).sum())
+        norm = np.sqrt(np.dot(vectors, vectors))
         valid = norm > threshold
         if valid:
             unit = vectors / norm
@@ -139,7 +148,7 @@ def euclidean(a, b):
 
 def is_file(obj):
     """
-    Check if an object is file- like
+    Check if an object is file-like
 
     Parameters
     ------------
@@ -254,22 +263,23 @@ def is_shape(obj, shape, allow_zeros=False):
     Compare the shape of a numpy.ndarray to a target shape,
     with any value less than zero being considered a wildcard
 
-    Note that if a list- like object is passed that is not a numpy
+    Note that if a list-like object is passed that is not a numpy
     array, this function will not convert it and will return False.
 
     Parameters
     ------------
     obj :   np.ndarray
-       Array to check the shape on
+      Array to check the shape on
     shape : list or tuple
-       Any negative term will be considered a wildcard
-       Any tuple term will be evaluated as an OR
+      Any negative term will be considered a wildcard
+      Any tuple term will be evaluated as an OR
     allow_zeros: bool
-        if False, zeros do not math negatives in shape.
+      if False, zeros do not match negatives in shape
 
     Returns
     ---------
-    shape_ok: bool, True if shape of obj matches query shape
+    shape_ok : bool
+      True if shape of obj matches query shape
 
     Examples
     ------------------------
@@ -300,6 +310,10 @@ def is_shape(obj, shape, allow_zeros=False):
     if (not hasattr(obj, 'shape') or
             len(obj.shape) != len(shape)):
         return False
+
+    # empty lists with any flexible dimensions match
+    if len(obj) == 0 and -1 in shape:
+        return True
 
     # loop through each integer of the two shapes
     # multiple values are sequences
@@ -369,7 +383,7 @@ def vector_hemisphere(vectors, return_sign=False):
 
     Parameters
     ------------
-    vectors : (n,3) float
+    vectors : (n, 3) float
       Input vectors
     return_sign : bool
       Return the sign mask or not
@@ -377,12 +391,11 @@ def vector_hemisphere(vectors, return_sign=False):
     Returns
     ----------
     oriented: (n, 3) float
-       Vectors with same magnitude as source
-       but possibly reversed to ensure all vectors
-       are in the same hemisphere.
+      Vectors with same magnitude as source
+      but possibly reversed to ensure all vectors
+      are in the same hemisphere.
     sign : (n,) float
-
-
+      [OPTIONAL] sign of original vectors
     """
     # vectors as numpy array
     vectors = np.asanyarray(vectors, dtype=np.float64)
@@ -422,7 +435,7 @@ def vector_hemisphere(vectors, return_sign=False):
                              negative[:, 0])] = -1.0
 
     else:
-        raise ValueError('vectors must be (n,3)!')
+        raise ValueError('vectors must be (n, 3)!')
 
     # apply the signs to the vectors
     oriented = vectors * signs.reshape((-1, 1))
@@ -435,7 +448,7 @@ def vector_hemisphere(vectors, return_sign=False):
 
 def vector_to_spherical(cartesian):
     """
-    Convert a set of cartesian points to (n,2) spherical unit
+    Convert a set of cartesian points to (n, 2) spherical unit
     vectors.
 
     Parameters
@@ -450,7 +463,7 @@ def vector_to_spherical(cartesian):
     """
     cartesian = np.asanyarray(cartesian, dtype=np.float64)
     if not is_shape(cartesian, (-1, 3)):
-        raise ValueError('Cartesian points must be (n,3)!')
+        raise ValueError('Cartesian points must be (n, 3)!')
 
     unit, valid = unitize(cartesian, check_valid=True)
     unit[np.abs(unit) < TOL_MERGE] = 0.0
@@ -464,7 +477,7 @@ def vector_to_spherical(cartesian):
 
 def spherical_to_vector(spherical):
     """
-    Convert a set of (n,2) spherical vectors to (n,3) vectors
+    Convert a set of (n, 2) spherical vectors to (n, 3) vectors
 
     Parameters
     ------------
@@ -531,7 +544,7 @@ def pairwise(iterable):
 
 try:
     # prefer the faster numpy version of multi_dot
-    # only included in recent- ish version of numpy
+    # only included in recent-ish version of numpy
     multi_dot = np.linalg.multi_dot
 except AttributeError:
     log.warning('np.linalg.multi_dot not available, using fallback')
@@ -555,7 +568,7 @@ def diagonal_dot(a, b):
 
     There are a lot of ways to do this though
     performance varies very widely. This method
-    uses the dot product to sum the row and avoids
+    uses a dot product to sum the row and avoids
     function calls if at all possible.
 
     Comparing performance of some equivalent versions:
@@ -600,13 +613,12 @@ def diagonal_dot(a, b):
     a = np.asanyarray(a)
     # 3x faster than (a * b).sum(axis=1)
     # avoiding np.ones saves 5-10% sometimes
-    result = np.dot(a * b, [1.0] * a.shape[1])
-    return result
+    return np.dot(a * b, [1.0] * a.shape[1])
 
 
 def row_norm(data):
     """
-    Compute the norm per- row of a numpy array.
+    Compute the norm per-row of a numpy array.
 
     This is identical to np.linalg.norm(data, axis=1) but roughly
     three times faster due to being less general.
@@ -620,7 +632,7 @@ def row_norm(data):
     Parameters
     -------------
     data : (n, d) float
-      Input 2D data to calculate per- row norm of
+      Input 2D data to calculate per-row norm of
 
     Returns
     -------------
@@ -647,8 +659,7 @@ def stack_3D(points, return_2D=False):
     points : (n, 3) float
       Points in space
     is_2D : bool
-      Only returned if return_2D
-      If source points were (n, 2) True
+      [OPTIONAL] if source points were (n, 2)
     """
     points = np.asanyarray(points, dtype=np.float64)
     shape = points.shape
@@ -663,7 +674,7 @@ def stack_3D(points, return_2D=False):
     elif shape[1] == 3:
         is_2D = False
     else:
-        raise ValueError('Points must be (n,2) or (n,3)!')
+        raise ValueError('Points must be (n, 2) or (n, 3)!')
 
     if return_2D:
         return points, is_2D
@@ -735,7 +746,7 @@ def multi_dict(pairs):
 
     Parameters
     ------------
-    pairs: (n,2) array of key, value pairs
+    pairs: (n, 2) array of key, value pairs
 
     Returns
     ----------
@@ -761,7 +772,7 @@ def tolist(data):
     Returns
     ----------
     result : any
-      JSON- serializable version of data
+      JSON-serializable version of data
     """
     result = json.loads(jsonify(data))
     return result
@@ -792,7 +803,7 @@ def distance_to_end(file_obj):
 
     Parameters
     ------------
-    file_obj: open file- like object
+    file_obj: open file-like object
 
     Returns
     ----------
@@ -829,7 +840,7 @@ def decimal_to_digits(decimal, min_digits=None):
 def hash_file(file_obj,
               hash_function=hashlib.md5):
     """
-    Get the hash of an open file- like object.
+    Get the hash of an open file-like object.
 
     Parameters
     ------------
@@ -889,14 +900,19 @@ def attach_to_log(level=logging.DEBUG,
 
     Parameters
     ------------
-    level:     logging level
-    handler:   log handler object
-    loggers:   list of loggers to attach to
-                 if None, will try to attach to all available
-    colors:    bool, if True try to use colorlog formatter
-    blacklist: list of str, names of loggers NOT to attach to
+    level : enum
+      Logging level, like logging.INFO
+    handler : None or logging.Handler
+      Handler to attach
+    loggers : None or (n,) logging.Logger
+      If None, will try to attach to all available
+    colors : bool
+      If True try to use colorlog formatter
+    blacklist : (n,) str
+      Names of loggers NOT to attach to
     """
 
+    # default blacklist includes ipython debugging stuff
     if blacklist is None:
         blacklist = ['TerminalIPythonApp',
                      'PYREADLINE',
@@ -909,6 +925,7 @@ def attach_to_log(level=logging.DEBUG,
     # make sure we log warnings from the warnings module
     logging.captureWarnings(capture_warnings)
 
+    # create a basic formatter
     formatter = logging.Formatter(
         "[%(asctime)s] %(levelname)-7s (%(filename)s:%(lineno)3s) %(message)s",
         "%Y-%m-%d %H:%M:%S")
@@ -928,7 +945,7 @@ def attach_to_log(level=logging.DEBUG,
         except ImportError:
             pass
 
-    # if no handler was passed, use a StreamHandler
+    # if no handler was passed use a StreamHandler
     if handler is None:
         handler = logging.StreamHandler()
 
@@ -938,7 +955,7 @@ def attach_to_log(level=logging.DEBUG,
 
     # if nothing passed use all available loggers
     if loggers is None:
-        # de- duplicate loggers using a set
+        # de-duplicate loggers using a set
         loggers = set(logging.Logger.manager.loggerDict.values())
     # add the warnings logging
     loggers.add(logging.getLogger('py.warnings'))
@@ -966,25 +983,29 @@ def stack_lines(indices):
 
     Parameters
     ------------
-    indices: sequence of items
+    indices : (m,) any
+      List of items to be stacked
 
     Returns
     ---------
-    stacked: (n,2) set of items
+    stacked : (n, 2) any
+      Stacked items
 
-    In [1]: trimesh.util.stack_lines([0,1,2])
+    Examples
+    ----------
+    In [1]: trimesh.util.stack_lines([0, 1, 2])
     Out[1]:
     array([[0, 1],
            [1, 2]])
 
-    In [2]: trimesh.util.stack_lines([0,1,2,4,5])
+    In [2]: trimesh.util.stack_lines([0, 1, 2, 4, 5])
     Out[2]:
     array([[0, 1],
            [1, 2],
            [2, 4],
            [4, 5]])
 
-    In [3]: trimesh.util.stack_lines([[0,0],[1,1],[2,2], [3,3]])
+    In [3]: trimesh.util.stack_lines([[0, 0], [1, 1], [2, 2], [3, 3]])
     Out[3]:
     array([[0, 0],
            [1, 1],
@@ -995,7 +1016,9 @@ def stack_lines(indices):
 
     """
     indices = np.asanyarray(indices)
-    if is_sequence(indices[0]):
+    if len(indices) == 0:
+        return np.array([])
+    elif is_sequence(indices[0]):
         shape = (-1, len(indices[0]))
     else:
         shape = (-1, 2)
@@ -1005,7 +1028,7 @@ def stack_lines(indices):
 
 def append_faces(vertices_seq, faces_seq):
     """
-    Given a sequence of zero- indexed faces and vertices
+    Given a sequence of zero-indexed faces and vertices
     combine them into a single array of faces and
     a single array of vertices.
 
@@ -1080,7 +1103,7 @@ def array_to_string(array,
     col_delim = str(col_delim)
     value_format = str(value_format)
 
-    # abort for non- flat arrays
+    # abort for non-flat arrays
     if len(array.shape) > 2:
         raise ValueError('conversion only works on 1D/2D arrays not %s!',
                          str(array.shape))
@@ -1384,8 +1407,10 @@ def submesh(mesh,
     # check to make sure we're not doing a whole bunch of work
     # to deliver a subset which ends up as the whole mesh
     if len(faces_sequence[0]) == len(mesh.faces):
-        all_faces = np.array_equal(np.sort(faces_sequence),
-                                   np.arange(len(faces_sequence)))
+        # compare sorted faces to arange
+        all_faces = np.array_equal(
+            np.sort(faces_sequence[0]),
+            np.arange(len(faces_sequence)))
         if all_faces:
             log.debug('entire mesh requested, returning copy')
             return mesh.copy()
@@ -1427,7 +1452,6 @@ def submesh(mesh,
             visual = visuals[0].concatenate(visuals[1:])
         else:
             visual = None
-
         vertices, faces = append_faces(vertices, faces)
         appended = trimesh_type(
             vertices=vertices,
@@ -1494,7 +1518,7 @@ def jsonify(obj, **kwargs):
 
     Parameters
     --------------
-    obj : JSON- serializable blob
+    obj : JSON-serializable blob
     **kwargs :
         Passed to json.dumps
 
@@ -1553,13 +1577,13 @@ def convert_like(item, like):
 
 def bounds_tree(bounds):
     """
-    Given a set of axis aligned bounds, create an r-tree for broad- phase
-    collision detection
+    Given a set of axis aligned bounds create an r-tree for broad-phase
+    collision detection.
 
     Parameters
     ------------
     bounds : (n, dimension * 2) float
-      Non- interleaved bounds, i.e. for a 2D bounds tree:
+      Non-interleaved bounds, i.e. for a 2D bounds tree:
         [(minx, miny, maxx, maxy), ...]
 
     Returns
@@ -1805,10 +1829,10 @@ def split_extension(file_name, special=['tar.bz2', 'tar.gz']):
 
 def triangle_strips_to_faces(strips):
     """
-    Given a sequence of triangle strips, convert them to (n, 3) faces.
+    Convert a sequence of triangle strips to (n, 3) faces.
 
     Processes all strips at once using np.concatenate and is significantly
-    faster than loop- based methods.
+    faster than loop-based methods.
 
     From the OpenGL programming guide describing a single triangle
     strip [v0, v1, v2, v3, v4]:
@@ -1926,7 +1950,7 @@ def write_encoded(file_obj,
 def unique_id(length=12, increment=0):
     """
     Generate a decent looking alphanumeric unique identifier.
-    First 16 bits are time- incrementing, followed by randomness.
+    First 16 bits are time-incrementing, followed by randomness.
 
     This function is used as a nicer looking alternative to:
     >>> uuid.uuid4().hex
@@ -1989,22 +2013,32 @@ def generate_basis(z):
     if z.shape != (3,):
         raise ValueError('z must be (3,) float!')
 
-    # normalize vector in- place
+    # normalize vector in-place
     z /= np.linalg.norm(z)
     # X as arbitrary perpendicular vector
     x = np.array([-z[1], z[0], 0.0])
     # avoid degenerate case
-    if np.isclose(np.linalg.norm(x), 0.0):
-        # Z is already along Z [0, 0, 1]
+    x_norm = np.linalg.norm(x)
+    if x_norm < 1e-12:
+        # this means that
         # so a perpendicular X is just X
-        x = np.array([1.0, 0.0, 0.0])
-    else:
-        # otherwise normalize X in- place
+        x = np.array([-z[2], z[1], 0.0])
         x /= np.linalg.norm(x)
+    else:
+        # otherwise normalize X in-place
+        x /= x_norm
     # get perpendicular Y with cross product
     y = np.cross(z, x)
-    # append result values into vector
+    # append result values into (3, 3) vector
     result = np.array([x, y, z], dtype=np.float64)
+
+    if _STRICT:
+        # run checks to make sure axis are perpendicular
+        assert np.abs(np.dot(x, z)) < 1e-8
+        assert np.abs(np.dot(y, z)) < 1e-8
+        assert np.abs(np.dot(x, y)) < 1e-8
+        # all vectors should be unit vector
+        assert np.allclose(np.linalg.norm(result, axis=1), 1.0)
 
     return result
 
@@ -2029,10 +2063,11 @@ def isclose(a, b, atol):
     Returns
     -----------
     close : np.ndarray, bool
-      Per- element closeness
+      Per-element closeness
     """
     diff = a - b
     close = np.logical_and(diff > -atol, diff < atol)
+
     return close
 
 
@@ -2040,9 +2075,6 @@ def allclose(a, b, atol):
     """
     A replacement for np.allclose that does few checks
     and validation and as a result is faster.
-
-        Note that this is used in tight loops, and as such
-    a and b MUST be np.ndarray, not list or "array-like"
 
     Parameters
     ------------
@@ -2060,7 +2092,7 @@ def allclose(a, b, atol):
     return np.all(np.abs(a - b).max() < atol)
 
 
-class FunctionRegistry(collections.Mapping):
+class FunctionRegistry(Mapping):
     """
     Non-overwritable mapping of string keys to functions.
 
@@ -2126,7 +2158,7 @@ def decode_text(text):
     Parameters
     ------------
     text : bytes
-      Data that might be strings
+      Data that might be a string
 
     Returns
     ------------

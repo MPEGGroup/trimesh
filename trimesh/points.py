@@ -8,9 +8,10 @@ import copy
 
 import numpy as np
 
-from .constants import tol
-from .geometry import plane_transform
 from .parent import Geometry
+from .geometry import plane_transform
+from .constants import tol
+from .visual import color
 
 from . import util
 from . import caching
@@ -158,8 +159,8 @@ def project_to_plane(points,
 
 def remove_close(points, radius):
     """
-    Given an (n, m) set of points where n=(2|3) return a list of points
-    where no point is closer than radius.
+    Given an (n, m) array of points return a subset of
+    points where no point is closer than radius.
 
     Parameters
     ------------
@@ -173,21 +174,38 @@ def remove_close(points, radius):
     culled : (m, dimension) float
       Points in space
     mask : (n,) bool
-      Which points from the original set were returned
+      Which points from the original points were returned
     """
-    from scipy.spatial import cKDTree as KDTree
+    from scipy.spatial import cKDTree
 
-    tree = KDTree(points)
-    consumed = np.zeros(len(points), dtype=np.bool)
-    unique = np.zeros(len(points), dtype=np.bool)
-    for i in range(len(points)):
-        if consumed[i]:
-            continue
-        neighbors = tree.query_ball_point(points[i], r=radius)
-        consumed[neighbors] = True
-        unique[i] = True
+    tree = cKDTree(points)
+    # get the index of every pair of points closer than our radius
+    pairs = tree.query_pairs(radius, output_type='ndarray')
 
-    return points[unique], unique
+    # how often each vertex index appears in a pair
+    # this is essentially a cheaply computed "vertex degree"
+    # in the graph that we could construct for connected points
+    count = np.bincount(pairs.ravel(), minlength=len(points))
+
+    # for every pair we know we have to remove one of them
+    # which of the two options we pick can have a large impact
+    # on how much over-culling we end up doing
+    column = count[pairs].argmax(axis=1)
+
+    # take the value in each row with the highest degree
+    # there is probably better numpy slicing you could do here
+    highest = pairs.ravel()[column + 2 * np.arange(len(column))]
+
+    # mask the vertices by index
+    mask = np.ones(len(points), dtype=np.bool)
+    mask[highest] = False
+
+    if tol.strict:
+        # verify we actually did what we said we'd do
+        test = cKDTree(points[mask])
+        assert len(test.query_pairs(radius)) == 0
+
+    return points[mask], mask
 
 
 def k_means(points, k, **kwargs):
@@ -372,6 +390,7 @@ class PointCloud(Geometry):
 
         if colors is not None:
             self.colors = colors
+            self.visual = color.ColorVisuals(self, vertex_colors=self.colors)
 
     def __setitem__(self, *args, **kwargs):
         return self.vertices.__setitem__(*args, **kwargs)
@@ -580,4 +599,24 @@ class PointCloud(Geometry):
         """
         Open a viewer window displaying the current PointCloud
         """
-        self.scene().show(**kwargs)
+        self.scene().show('gl')#**kwargs)
+
+    def export(self, file_obj=None, file_type=None, **kwargs):
+        """
+        Export the current pointcloud to a file object.
+        If file_obj is a filename, file will be written there.
+        Supported formats are xyz
+        Parameters
+        ------------
+        file_obj: open writeable file object
+          str, file name where to save the pointcloud
+          None, if you would like this function to return the export blob
+        file_type: str
+          Which file type to export as.
+          If file name is passed this is not required
+        """
+        from .exchange.export import export_mesh
+        return export_mesh(self,
+                           file_obj=file_obj,
+                           file_type=file_type,
+                           **kwargs)

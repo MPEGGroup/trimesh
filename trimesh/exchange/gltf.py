@@ -51,7 +51,7 @@ _default_material = {
         "metallicFactor": 0,
         "roughnessFactor": 0}}
 
-# specify common dtypes with forced little endian
+# specify dtypes with forced little endian
 float32 = np.dtype("<f4")
 uint32 = np.dtype("<u4")
 uint8 = np.dtype("<u1")
@@ -109,7 +109,9 @@ def export_gltf(scene,
 
     tree["buffers"] = buffers
     tree["bufferViews"] = views
-    files["model.gltf"] = json.dumps(tree).encode("utf-8")
+    # dump tree with compact separators
+    files["model.gltf"] = json.dumps(
+        tree, separators=(',', ':')).encode("utf-8")
     return files
 
 
@@ -158,8 +160,8 @@ def export_glb(scene, extras=None, include_normals=False):
     tree["buffers"] = [{"byteLength": len(buffer_data)}]
     tree["bufferViews"] = views
 
-    # export the tree to JSON for the content of the file
-    content = json.dumps(tree)
+    # export the tree to JSON for the header
+    content = json.dumps(tree, separators=(',', ':'))
     # add spaces to content, so the start of the data
     # is 4 byte aligned as per spec
     content += (4 - ((len(content) + 20) % 4)) * " "
@@ -221,12 +223,13 @@ def load_gltf(file_obj=None,
         tree = json.load(file_obj)
     except BaseException:
         # otherwise header should be in 'model.gltf'
-        data = resolver['model.gltf']
+        #data = resolver['model.gltf']
         # old versions of python/json need strings
-        try:
-            tree = json.loads(data)
-        except BaseException:
-            tree = json.loads(data.decode('utf-8'))
+        #try:
+        #    tree = json.loads(data)
+        #except BaseException:
+        #    tree = json.loads(util.decode_text(data))
+        tree = None
 
     # use the URI and resolver to get data from file names
     buffers = [_uri_to_bytes(uri=b['uri'], resolver=resolver)
@@ -285,7 +288,7 @@ def load_glb(file_obj, resolver=None, **mesh_kwargs):
     json_data = file_obj.read(int(chunk_length))
     # convert to text
     if hasattr(json_data, "decode"):
-        json_data = json_data.decode("utf-8")
+        json_data = util.decode_text(json_data)
     # load the json header to native dict
     header = json.loads(json_data)
 
@@ -322,7 +325,7 @@ def load_glb(file_obj, resolver=None, **mesh_kwargs):
 def _uri_to_bytes(uri, resolver):
     """
     Take a URI string and load it as a
-    a filename or as base64
+    a filename or as base64.
 
     Parameters
     --------------
@@ -426,7 +429,12 @@ def _create_gltf_structure(scene,
     nodes = scene.graph.to_gltf(scene=scene)
     tree.update(nodes)
 
+    # store materials as {hash : index} to avoid duplicates
+    mat_hashes = {}
+    # store data from geometries
     buffer_items = []
+
+    # loop through every geometry
     for name, geometry in scene.geometry.items():
         if util.is_instance_named(geometry, "Trimesh"):
             # add the mesh
@@ -435,7 +443,8 @@ def _create_gltf_structure(scene,
                 name=name,
                 tree=tree,
                 buffer_items=buffer_items,
-                include_normals=include_normals)
+                include_normals=include_normals,
+                mat_hashes=mat_hashes)
         elif util.is_instance_named(geometry, "Path"):
             # add Path2D and Path3D objects
             _append_path(
@@ -443,14 +452,13 @@ def _create_gltf_structure(scene,
                 name=name,
                 tree=tree,
                 buffer_items=buffer_items)
-    # cull empty or unpopulated fields here
-    if len(tree['textures']) == 0:
-        tree.pop('textures')
-        tree.pop('samplers')
-    if len(tree["materials"]) == 0:
-        tree.pop("materials")
-    if len(tree['images']) == 0:
-        tree.pop('images')
+
+    # cull empty or unpopulated fields
+    # check keys that might be empty so we can remove them
+    check = ['textures', 'samplers', 'materials', 'images']
+    for key in check:
+        if len(tree[key]) == 0:
+            tree.pop(key)
 
     # in unit tests compare our header against the schema
     if tol.strict:
@@ -463,7 +471,8 @@ def _append_mesh(mesh,
                  name,
                  tree,
                  buffer_items,
-                 include_normals):
+                 include_normals,
+                 mat_hashes):
     """
     Append a mesh to the scene structure and put the
     data into buffer_items.
@@ -480,6 +489,8 @@ def _append_mesh(mesh,
       Will have buffer appended with mesh data
     include_normals : bool
       Include vertex normals in export or not
+    mat_hashes : dict
+      Which materials have already been added
     """
     # meshes reference accessor indexes
     # mode 4 is GL_TRIANGLES
@@ -547,26 +558,24 @@ def _append_mesh(mesh,
             "byteOffset": 0})
         # the actual color data
         buffer_items.append(color_data)
-
     elif hasattr(mesh.visual, 'material'):
-        # set the material to the last index in the tree
-        tree["meshes"][-1]["primitives"][0]["material"] = len(tree["materials"])
-        # immediately append the material to materials list
-        # will also append necessary images and textures to tree
-        _append_material(mat=mesh.visual.material,
-                         tree=tree,
-                         buffer_items=buffer_items)
-
+        # append the material and then set from returned index
+        tree["meshes"][-1]["primitives"][0]["material"] = _append_material(
+            mat=mesh.visual.material,
+            tree=tree,
+            buffer_items=buffer_items,
+            mat_hashes=mat_hashes)
         # if mesh has UV coordinates defined export them
-        if (hasattr(mesh.visual, 'uv') and
-                np.shape(mesh.visual.uv) == (len(mesh.vertices), 2)):
-
+        has_uv = (hasattr(mesh.visual, 'uv') and
+                  mesh.visual.uv is not None and
+                  len(mesh.visual.uv) == len(mesh.vertices))
+        if has_uv:
             # add the reference for UV coordinates
             tree["meshes"][-1]["primitives"][0]["attributes"][
                 "TEXCOORD_0"] = len(tree["accessors"])
-
+            # slice off W if passed
+            uv = mesh.visual.uv.copy()[:, :2]
             # reverse the Y for GLTF
-            uv = mesh.visual.uv.copy()
             uv[:, 1] = 1.0 - uv[:, 1]
             # convert UV coordinate data to bytes and pad
             uv_data = _byte_pad(uv.astype(float32).tobytes())
@@ -601,10 +610,10 @@ def _append_mesh(mesh,
 
 def _byte_pad(data, bound=4):
     """
-    GLTF wants chunks aligned with 4 byte boundaries
-    so this function will add padding to the end of a
-    chunk of bytes so that it aligns with a specified
-    boundary size
+    GLTF wants chunks aligned with 4 byte boundaries.
+    This function will add padding to the end of a
+    chunk of bytes so that it aligns with the passed
+    boundary size.
 
     Parameters
     --------------
@@ -632,7 +641,6 @@ def _byte_pad(data, bound=4):
                 'byte_pad failed! ori:{} res:{} pad:{} req:{}'.format(
                     len(data), len(result), count, bound))
         return result
-
     return data
 
 
@@ -743,10 +751,12 @@ def _parse_materials(header, views, resolver=None):
         for mat in header["materials"]:
             # flatten key structure so we can loop it
             loopable = mat.copy()
+            isPbr = False
             # this key stores another dict of crap
             if "pbrMetallicRoughness" in loopable:
                 # add keys of keys to top level dict
                 loopable.update(loopable.pop("pbrMetallicRoughness"))
+                isPbr = True
 
             # save flattened keys we can use for kwargs
             pbr = {}
@@ -759,7 +769,10 @@ def _parse_materials(header, views, resolver=None):
                     # store the actual image as the value
                     pbr[k] = images[idx]
             # create a PBR material object for the GLTF material
-            materials.append(visual.material.PBRMaterial(**pbr))
+            if isPbr:
+                materials.append(visual.material.PBRMaterial(**pbr))
+            else:
+                materials.append(visual.material.SimpleMaterial(**pbr))
 
     return materials
 
@@ -785,14 +798,23 @@ def _read_buffers(header, buffers, mesh_kwargs, resolver=None):
     """
     # split buffer data into buffer views
     views = [None] * len(header["bufferViews"])
+    strides = [None] * len(header["bufferViews"])
+    lengths = [None] * len(header["bufferViews"])
+    
     for i, view in enumerate(header["bufferViews"]):
         if "byteOffset" in view:
             start = view["byteOffset"]
         else:
             start = 0
+        if "byteStride" in view:
+            stride = view["byteStride"]
+        else:
+            stride = None        
+
         end = start + view["byteLength"]
         views[i] = buffers[view["buffer"]][start:end]
-
+        strides[i] = stride
+        lengths[i] = view["byteLength"]
         assert len(views[i]) == view["byteLength"]
 
     # load data from buffers into numpy arrays
@@ -820,11 +842,20 @@ def _read_buffers(header, buffers, mesh_kwargs, resolver=None):
             else:
                 # otherwise assume we start at first byte
                 start = 0
-            # length is the number of bytes per item times total
-            length = np.dtype(dtype).itemsize * count * per_count
             # load the bytes data into correct dtype and shape
-            access[index] = np.frombuffer(
-                data[start:start + length], dtype=dtype).reshape(shape)
+            
+            if (strides[a["bufferView"]]):
+                # length is the number of bytes per item times total            
+                #length = lengths[a["bufferView"]] 
+                length = strides[a["bufferView"]] * count# * per_count
+            
+                stride = (strides[a["bufferView"]],np.dtype(dtype).itemsize) 
+                bufData = np.frombuffer(data[start:start + length], dtype=dtype)
+                access[index] = np.lib.stride_tricks.as_strided(bufData, shape, stride)
+            else:
+                length = np.dtype(dtype).itemsize * count * per_count
+                access[index] = np.frombuffer(data[start:start + length], dtype=dtype).reshape(shape)
+            
         else:
             # a "sparse" accessor should be initialized as zeros
             access[index] = np.zeros(
@@ -847,9 +878,9 @@ def _read_buffers(header, buffers, mesh_kwargs, resolver=None):
             metadata['units'] = 'meters'
 
         for j, p in enumerate(m["primitives"]):
-            # if we don't have a triangular mesh continue
+            # if we don't have a triangular mesh or a point cloud continue
             # if not specified assume it is a mesh
-            if "mode" in p and p["mode"] != 4:
+            if "mode" in p and p["mode"] != 4 and p['mode'] != 0:
                 continue
 
             # store those units
@@ -860,15 +891,18 @@ def _read_buffers(header, buffers, mesh_kwargs, resolver=None):
             # get vertices from accessors
             kwargs["vertices"] = access[p["attributes"]["POSITION"]]
 
+            if 'COLOR_0' in p["attributes"]:
+                kwargs["colors"] = access[p["attributes"]["COLOR_0"]]
+
             # get faces from accessors
             if 'indices' in p:
                 kwargs["faces"] = access[p["indices"]].reshape((-1, 3))
-            else:
+            #else:
                 # indices are apparently optional and we are supposed to
                 # do the same thing as webGL drawArrays?
-                kwargs['faces'] = np.arange(
-                    len(kwargs['vertices']),
-                    dtype=np.int64).reshape((-1, 3))
+            #    kwargs['faces'] = np.arange(
+            #        len(kwargs['vertices']),
+            #        dtype=np.int64).reshape((-1, 3))
 
             # do we have UV coordinates
             if "material" in p:
@@ -992,20 +1026,20 @@ def _read_buffers(header, buffers, mesh_kwargs, resolver=None):
             geometries = mesh_prim[child["mesh"]]
             for name in geometries:
                 kwargs["geometry"] = name
-                kwargs["frame_to"] = "{}_{}".format(
-                    name, util.unique_id(
-                        length=6, increment=len(graph)).upper()
-                )
+                if 'name' in child:
+                    kwargs['frame_to'] = child['name']
+                else:
+                    kwargs["frame_to"] = "{}_{}".format(
+                        name, util.unique_id(
+                            length=6, increment=len(graph)).upper())
                 # append the edge with the mesh frame
                 graph.append(kwargs.copy())
 
-    # kwargs to be loaded
-    result = {
-        "class": "Scene",
-        "geometry": meshes,
-        "graph": graph,
-        "base_frame": base_frame,
-    }
+    # kwargs for load_kwargs
+    result = {"class": "Scene",
+              "geometry": meshes,
+              "graph": graph,
+              "base_frame": base_frame}
 
     return result
 
@@ -1082,14 +1116,13 @@ def _append_image(img, tree, buffer_items):
     return len(tree['images']) - 1
 
 
-def _append_material(mat, tree, buffer_items):
+def _append_material(mat, tree, buffer_items, mat_hashes):
     """
     Add passed PBRMaterial as GLTF 2.0 specification JSON
     serializable data:
     - images are added to `tree['images']`
     - texture is added to `tree['texture']`
     - material is added to `tree['materials']`
-
 
     Parameters
     ------------
@@ -1099,41 +1132,59 @@ def _append_material(mat, tree, buffer_items):
       GLTF header blob
     buffer_items : (n,) bytes
       Binary blobs with various data
-    """
+    mat_hashes : dict
+      Which materials have already been added
+      Stored as { hashed : material index }
 
-    # if they have passed a material with
-    # a PBR conversion method call it
-    # TODO: implement this method on SimpleMaterial
+    Returns
+    -------------
+    index : int
+      Index at which material was added
+    """
+    # materials are hashable
+    hashed = hash(mat)
+    # check stored material indexes to see if material
+    # has already been added
+    if mat_hashes is not None and hashed in mat_hashes:
+        return mat_hashes[hashed]
+
+    # convert passed input to PBR if necessary
     if hasattr(mat, 'to_pbr'):
-        mat = mat.to_pbr()
+        as_pbr = mat.to_pbr()
+    else:
+        as_pbr = mat
 
     # a default PBR metallic material
-    pbr = {"pbrMetallicRoughness": {}}
+    result = {"pbrMetallicRoughness": {}}
     try:
         # try to convert base color to (4,) float color
-        pbr['baseColorFactor'] = visual.color.to_float(
-            mat.baseColorFactor).reshape(4).tolist()
+        result['baseColorFactor'] = visual.color.to_float(
+            as_pbr.baseColorFactor).reshape(4).tolist()
     except BaseException:
         pass
 
     try:
-        pbr['emissiveFactor'] = mat.emissiveFactor.reshape(3).tolist()
+        result['emissiveFactor'] = as_pbr.emissiveFactor.reshape(3).tolist()
     except BaseException:
         pass
 
+    # if alphaMode is defined, export
+    if isinstance(as_pbr.alphaMode, str):
+        result['alphaMode'] = as_pbr.alphaMode
+
     # if scalars are defined correctly export
-    if isinstance(mat.metallicFactor, float):
-        pbr['metallicFactor'] = mat.metallicFactor
-    if isinstance(mat.roughnessFactor, float):
-        pbr['roughnessFactor'] = mat.roughnessFactor
+    if isinstance(as_pbr.metallicFactor, float):
+        result['metallicFactor'] = as_pbr.metallicFactor
+    if isinstance(as_pbr.roughnessFactor, float):
+        result['roughnessFactor'] = as_pbr.roughnessFactor
 
     # which keys of the PBRMaterial are images
     image_mapping = {
-        'baseColorTexture': mat.baseColorTexture,
-        'emissiveTexture': mat.emissiveTexture,
-        'normalTexture': mat.normalTexture,
-        'occlusionTexture': mat.occlusionTexture,
-        'metallicRoughnessTexture': mat.metallicRoughnessTexture}
+        'baseColorTexture': as_pbr.baseColorTexture,
+        'emissiveTexture': as_pbr.emissiveTexture,
+        'normalTexture': as_pbr.normalTexture,
+        'occlusionTexture': as_pbr.occlusionTexture,
+        'metallicRoughnessTexture': as_pbr.metallicRoughnessTexture}
 
     for key, img in image_mapping.items():
         if img is None:
@@ -1147,7 +1198,7 @@ def _append_material(mat, tree, buffer_items):
         # if it failed for any reason, it will return None
         if index is not None:
             # add a reference to the base color texture
-            pbr[key] = {'index': len(tree['textures'])}
+            result[key] = {'index': len(tree['textures'])}
             # add an object for the texture
             tree['textures'].append({'source': index, 'sampler': 0})
 
@@ -1157,18 +1208,25 @@ def _append_material(mat, tree, buffer_items):
     pbr_subset = ['baseColorTexture',
                   'baseColorFactor',
                   'roughnessFactor',
+                  'metallicFactor',
                   'metallicRoughnessTexture']
     # move keys down a level
     for key in pbr_subset:
-        if key in pbr:
-            pbr["pbrMetallicRoughness"][key] = pbr.pop(key)
+        if key in result:
+            result["pbrMetallicRoughness"][key] = result.pop(key)
 
     # if we didn't have any PBR keys remove the empty key
-    if len(pbr['pbrMetallicRoughness']) == 0:
-        pbr.pop('pbrMetallicRoughness')
+    if len(result['pbrMetallicRoughness']) == 0:
+        result.pop('pbrMetallicRoughness')
 
-    # append the new material
-    tree['materials'].append(pbr)
+    # which index are we inserting material at
+    index = len(tree['materials'])
+    # add the material to the data structure
+    tree['materials'].append(result)
+    # add the material index in-place
+    mat_hashes[hashed] = index
+
+    return index
 
 
 def validate(header):
@@ -1211,11 +1269,9 @@ def get_schema():
     from ..visual.resolvers import ZipResolver
 
     # get a blob of a zip file including the GLTF 2.0 schema
-    blob = resources.get_resource(
-        'gltf_2.0_schema.zip', decode=False)
+    blob = resources.get('gltf_2_schema.zip', decode=False)
     # get the zip file as a dict keyed by file name
-    archive = util.decompress(
-        util.wrap_as_stream(blob), 'zip')
+    archive = util.decompress(util.wrap_as_stream(blob), 'zip')
     # get a resolver object for accessing the schema
     resolver = ZipResolver(archive)
     # remove references to other files in the schema and load

@@ -80,7 +80,16 @@ class Scene(Geometry):
         self.camera_transform = camera_transform
 
     def apply_transform(self, transform):
-        raise NotImplementedError
+        """
+        Apply a transform to every geometry in the scene.
+
+        Parameters
+        --------------
+        transform : (4, 4)
+          Homogeneous transformation matrix
+        """
+        for geometry in self.geometry.values():
+            geometry.apply_transform(transform)
 
     def add_geometry(self,
                      geometry,
@@ -251,13 +260,16 @@ class Scene(Geometry):
         corners_inst = []
         # (n, 3) float corners of each geometry
         corners_geom = {k: bounds_module.corners(v.bounds)
-                        for k, v in self.geometry.items()}
+                        for k, v in self.geometry.items()
+                        if v.bounds is not None}
+        if len(corners_geom) == 0:
+            return np.array([])
 
         for node_name in self.graph.nodes_geometry:
             # access the transform and geometry name from node
             transform, geometry_name = self.graph[node_name]
             # not all nodes have associated geometry
-            if geometry_name is None:
+            if geometry_name not in corners_geom:
                 continue
             # transform geometry corners into where
             # the instance of the geometry is located
@@ -277,9 +289,13 @@ class Scene(Geometry):
 
         Returns
         --------
-        bounds: (2,3) float points for min, max corner
+        bounds : (2, 3) float or None
+          Position of [min, max] bounding box
+          Returns None if no valid bounds exist
         """
         corners = self.bounds_corners
+        if len(corners) == 0:
+            return None
         bounds = np.array([corners.min(axis=0),
                            corners.max(axis=0)])
         return bounds
@@ -487,18 +503,20 @@ class Scene(Geometry):
 
     def camera_rays(self):
         """
-        Calculate the trimesh.scene.Camera origin and ray direction vectors.
-
-        Will return one ray per pixel, as set in camera.resolution.
+        Calculate the trimesh.scene.Camera origin and ray
+        direction vectors. Returns one ray per pixel as set
+        in camera.resolution
 
         Returns
         --------------
-        origins: (3,) float
-            Ray origins in space
-        vectors: (n, 3)
-            Ray direction unit vectors in world coordinates
+        origins: (n, 3) float
+          Ray origins in space
+        vectors: (n, 3) float
+          Ray direction unit vectors in world coordinates
+        pixels : (n, 2) int
+          Which pixel does each ray correspond to in an image
         """
-        vectors = self.camera.to_rays()
+        vectors, pixels = self.camera.to_rays()
         transform = self.camera_transform
 
         # apply the rotation to the direction vectors
@@ -506,10 +524,11 @@ class Scene(Geometry):
             vectors,
             transform,
             translate=False)
-
-        # camera origin is single point, extract from transform
-        origin = transformations.translation_from_matrix(transform)
-        return origin, vectors
+        # camera origin is single point so extract from transform
+        origins = (np.ones_like(vectors) *
+                   transformations.translation_from_matrix(
+                       transform))
+        return origins, vectors, pixels
 
     @camera_transform.setter
     def camera_transform(self, camera_transform):
@@ -614,23 +633,29 @@ class Scene(Geometry):
                           matrix=matrix)
         self.graph.base_frame = new_base
 
-    def dump(self):
+    def dump(self, concatenate=False):
         """
         Append all meshes in scene to a list of meshes.
 
         Returns
         ----------
-        dumped: (n,) list, of Trimesh objects transformed to their
-                           location the scene.graph
+        dumped : (n,) list
+          Trimesh objects transformed to their
+          location the scene.graph
         """
-        result = collections.deque()
-
+        result = []
         for node_name in self.graph.nodes_geometry:
             transform, geometry_name = self.graph[node_name]
-
+            # get a copy of the geometry
             current = self.geometry[geometry_name].copy()
+            # move the geometry vertices into the requested frame
             current.apply_transform(transform)
+            # save to our list of meshes
             result.append(current)
+
+        if concatenate:
+            return util.concatenate(result)
+
         return np.array(result)
 
     @caching.cache_decorator
@@ -669,9 +694,9 @@ class Scene(Geometry):
         file_type = file_type.strip().lower().lstrip('.')
 
         if file_type == 'gltf':
-            data = gltf.export_gltf(self)
+            data = gltf.export_gltf(self, **kwargs)
         elif file_type == 'glb':
-            data = gltf.export_glb(self)
+            data = gltf.export_glb(self, **kwargs)
         elif file_type == 'dict':
             from ..exchange.export import scene_to_dict
             data = scene_to_dict(self)
@@ -681,7 +706,7 @@ class Scene(Geometry):
         else:
             raise ValueError('unsupported export format: {}'.format(file_type))
 
-        # now write the data, or not
+        # now write the data or return bytes of result
         if hasattr(file_obj, 'write'):
             # if it's just a regular file object
             file_obj.write(data)
@@ -699,12 +724,15 @@ class Scene(Geometry):
 
         Parameters
         -----------
-        resolution: (2,) int, resolution to render image
-        **kwargs:  passed to SceneViewer constructor
+        resolution : (2,) int
+          Resolution to render image
+        **kwargs
+          Passed to SceneViewer constructor
 
         Returns
         -----------
-        png: bytes, render of scene in PNG form
+        png : bytes
+          Render of scene as a PNG
         """
         from ..viewer import render_scene
         png = render_scene(scene=self,

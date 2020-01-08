@@ -3,12 +3,13 @@ import numpy as np
 
 from string import Template
 
+
 from ..arc import to_threepoint
 from ..entities import Line, Arc, BSpline, Text
 
+from ... import resources
 from ...constants import log
 from ...constants import tol_path as tol
-from ...resources import get_resource
 from ... import util
 from ... import grouping
 
@@ -60,7 +61,7 @@ XRECORD_MAX_INDEX = 368
 
 # get the TEMPLATES for exporting DXF files
 TEMPLATES = {k: Template(v) for k, v in json.loads(
-    get_resource('dxf.json.template')).items()}
+    resources.get('dxf.json.template')).items()}
 
 
 def load_dxf(file_obj, **kwargs):
@@ -238,36 +239,30 @@ def load_dxf(file_obj, **kwargs):
         """
         Convert a DXF TEXT entity into a native text entity.
         """
-        if '50' in e:
-            # rotation angle converted to radians
-            angle = np.radians(float(e['50']))
-        else:
-            # otherwise no rotation
-            angle = 0.0
-
         # text with leading and trailing whitespace removed
         text = e['1'].strip()
-
-        # height of text
-        if '40' in e:
+        # try getting optional height of text
+        try:
             height = float(e['40'])
-        else:
+        except BaseException:
             height = None
-
+        try:
+            # rotation angle converted to radians
+            angle = np.radians(float(e['50']))
+        except BaseException:
+            # otherwise no rotation
+            angle = 0.0
         # origin point
-        origin = np.array([e['10'],
-                           e['20']]).astype(np.float64)
-
-        # an origin- relative point (so transforms work)
+        origin = np.array(
+            [e['10'], e['20']], dtype=np.float64)
+        # an origin-relative point (so transforms work)
         vector = origin + [np.cos(angle), np.sin(angle)]
-
         # try to extract a (horizontal, vertical) text alignment
         align = ['center', 'center']
         try:
             align[0] = ['left', 'center', 'right'][int(e['72'])]
         except BaseException:
             pass
-
         # append the entity
         entities.append(Text(origin=len(vertices),
                              vector=len(vertices) + 1,
@@ -554,15 +549,10 @@ def export_dxf(path, layers=None):
         subs : dict
           Has keys 'COLOR', 'LAYER', 'NAME'
         """
+        # TODO : convert RGBA entity.color to index
         subs = {'COLOR': 255,  # default is ByLayer
                 'LAYER': 0,
                 'NAME': str(id(entity))[:16]}
-
-        if hasattr(entity, 'color'):
-            # all colors must be integers between 0-255
-            color = str(entity.color)
-            if str.isnumeric(color):
-                subs['COLOR'] = int(color) % 256
 
         if hasattr(entity, 'layer'):
             subs['LAYER'] = str(entity.layer)
@@ -1009,8 +999,8 @@ def _teigha_convert(data, extension='dwg'):
         raise ValueError('conversion using Teigha failed!')
 
     # load converted file into a string
-    with open(name_result, 'r') as f:
-        converted = f.read()
+    with open(name_result, 'rb') as f:
+        converted = f.read().decode(errors='ignore')
 
     # remove the temporary directories
     shutil.rmtree(dir_out)
